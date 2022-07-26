@@ -1,0 +1,305 @@
+---
+title: "Divvy Modeling"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(zoo)
+library(ggplot2)
+library(imputeFin) #<-To impute missing Time Sereis Data
+library(stringr) #<- Feature Transformation
+library(fastDummies)
+library(Hmisc)
+library(TSA)
+library("forecast")
+library(corrplot)
+library(stats)
+library(xts)
+library('arfima')
+library('lmtest')
+library(dplyr )
+```
+
+```{r}
+#Loading data
+In_result <- read.csv('E:\\Data\\divvy\\TimeS/df_ts_in_1721_Station_Daily_F_results.csv',header=TRUE)
+df_in_ts  <- read.csv('E:\\Data\\divvy\\TimeS/df_ts_in_1721_Station_Daily.csv',header=TRUE)
+```
+
+```{r}
+In_result[In_result$CV2 %>% order(),]
+#Using Dearborn St & Monroe St as a representative 
+```
+```{r}
+TS_sample <- xts(df_in_ts$Dearborn.St...Monroe.St,
+                  order.by = df_in_ts$date %>%  as.Date())
+plot(TS_sample)
+```
+```{r fig.height=5, fig.width=15}
+Ts_train <- ts(TS_sample['/2018'],frequency=365,start=c(2017,1))
+Ts_test <- ts(TS_sample['2018/2020'],frequency=365,start=c(2019,1),end=c(2020,1)) #start=c(2021
+Ts_Post_covid <- ts(TS_sample['2020/'],frequency=365,start=c(2020,1))
+
+autoplot(Ts_train) + 
+    autolayer(Ts_test) +
+    autolayer(Ts_Post_covid)
+```
+
+```{r}
+#TS demonstrates STRONG autocorrelation and Weekly Seasonality
+acf(TS_sample)
+pacf(TS_sample)
+```
+```{r}
+#There are 3 Dominant frequencies in the Time Sereis 
+p = periodogram(TS_sample)
+
+dd = data.frame(freq=p$freq, spec=p$spec)
+order = dd[order(-dd$spec),]
+top3 = head(order, 3)
+ 
+# display the 2 highest "power" frequencies
+top3$period <- 1/top3$freq 
+
+top3
+```
+
+```{r fig.height=5, fig.width=15}
+#7,365 
+ts_temp <- msts(Ts_train, seasonal.periods=c(7, 365))
+model <- tbats(ts_temp)
+comp <- tbats.components(model)
+plot(comp)
+```
+```{r fig.height=5, fig.width=15}
+autoplot(forecast(model, h=365))
+```
+
+```{r fig.height=5, fig.width=15}
+#3.5, 7 ,365 
+ts_temp <- msts(Ts_train, seasonal.periods=c(3.5, 7, 365))
+model2 <- tbats(ts_temp)
+comp2 <- tbats.components(model2)
+plot(comp2)
+autoplot(forecast(model2, h=365))
+```
+
+```{r fig.height=5, fig.width=15}
+f2 <- forecast(model2, h=365)
+
+autoplot(f2) +
+  autolayer(Ts_test, series="Data") +
+  autolayer(f2$mean, series="Forecasts")
+
+autoplot(Ts_test) +
+  autolayer(Ts_test, series="Test") +
+  autolayer(f2$mean, series="Forecasts")
+```
+
+```{r}
+library(CausalImpact)
+#First Covid Case in Chicago: 2020-01-24
+#First stay-at-home order Chicago: 2020-03-21
+
+start <- as.Date("2017-01-01")
+end <- as.Date("2021-09-01")
+pre.period <- c(start, as.Date("2020-03-20"))
+post.period <- c(as.Date("2020-03-21"), end)
+
+impact_COVID <- CausalImpact(TS_sample, pre.period, post.period, model.args = list(niter = 1000, nseasons = 52))
+
+plot(impact_COVID)
+summary(impact_COVID)
+summary(impact_COVID, "report")
+```
+```{r fig.height=5, fig.width=15}
+#Manual Causual Inferencing
+f2 <- forecast(model2, h=365*2+ 8*30+9)
+
+autoplot(f2$mean) +
+  autolayer(Ts_test, series="Test") +
+  autolayer(Ts_Post_covid, series="Post_Covid") +
+  geom_vline(xintercept = 2020 + (60+21)/365 ,col = "red",size=2)
+```
+```{r fig.height=5, fig.width=15}
+Ts_Validation <- ts(rbind(Ts_test,Ts_Post_covid),frequency = 365,start=c(2019,1)) 
+
+Test_Res <- f2$mean - Ts_Validation
+autoplot(Test_Res) +
+  geom_vline(xintercept = 2020 + (60+21)/365 ,col = "red",size=2)
+```
+```{r}
+acf(f2$residuals)
+```
+```{r}
+periodogram(f2$residuals)
+```
+
+# Dynamic Regression & Regressor Causal Impact
+```{r}
+df_weather <- read.csv('E:\\Data\\divvy\\Chicago_Weather_2017_2022_Daily.csv')
+TS_weather <- xts(df_weather$temp,
+                  order.by = df_weather$day  %>%  as.Date())
+TS_weather <- TS_weather['/2021-8']
+autoplot(TS_weather)
+df_weather_station = cbind(df_weather %>% head(1705),TS_sample)
+```
+
+```{r}
+ccf(x=TS_weather %>% as.numeric() , 
+    y=TS_sample %>% as.numeric() ,
+    ylab = "cross-correlation",lag.max = NULL, type = c("correlation", "covariance"),plot = TRUE)
+```
+```{r}
+ccf(x=df_weather_station$dew %>% as.numeric() , 
+    y=df_weather_station$TS_sample %>% as.numeric())
+
+ccf(x=df_weather_station$humidity %>% as.numeric() , 
+    y=df_weather_station$TS_sample %>% as.numeric())
+```
+
+```{r}
+#Step1:Fit Linear Model,Conduct Residual Analysis
+series <- cbind(TS_sample, TS_weather)
+model_lm1 <- lm(TS_sample ~TS_weather, data = series)
+summary(model_lm1)
+ts.plot(model_lm1$residuals)
+```
+Observation: Weather, Traffic are Cointegrated. Since they have same level of non-stationarity, their linear combination cancels out the stochastic trends.
+
+Explore effect of other features:
+```{r}
+model_lm2 <- lm(TS_sample ~temp   + dew +  humidity, data = df_weather_station)
+summary(model_lm2)
+ts.plot(model_lm1$residuals)
+
+```
+### Dynamic Reg - Residual Analysis 
+```{r}
+#Non Stationary, Strong Seasonality
+acf(model_lm1$residuals)
+```
+```{r}
+#There are 3 Dominant frequencies in the Time Sereis 
+p = periodogram(model_lm1$residuals)
+
+dd = data.frame(freq=p$freq, spec=p$spec)
+order = dd[order(-dd$spec),]
+top3 = head(order, 3)
+ 
+# display the 2 highest "power" frequencies
+top3$period <- 1/top3$freq 
+
+top3
+```
+```{r}
+#Dynamic Regression:
+arma.innovation <- function(x, arma.model, ar.truncation=10) {
+  p <- arma.model$arma[1]
+  q <- arma.model$arma[2]
+  ar.coef <- arma.model$coef[seq_len(p)]
+  ma.coef <- arma.model$coef[p + seq_len(q)]
+  if (q == 0) {
+    infinite.ar.coef <- ar.coef
+  } else {
+    infinite.ar.coef <- -ARMAtoMA(-ma.coef, -ar.coef, ar.truncation)
+  }
+  return(as.vector(stats::filter(x, c(1, -infinite.ar.coef), side=1)))
+}
+
+lm.arma <- function(x,y,arma.model) {
+  return(lm(arma.innovation(y,arma.model) ~ arma.innovation(x,arma.model)))
+}
+
+
+dynamic_reg_autoarima <- auto.arima(model_lm1$residuals,seasonal = TRUE)
+summary(dynamic_reg_autoarima)
+model.ma1 <- lm.arma(df_weather_station$temp, df_weather_station$TS_sample,dynamic_reg_autoarima) 
+residual.ma1 <- residuals(model.ma1)
+
+plot.ts(residual.ma1)
+acf(residual.ma1)
+periodogram(residual.ma1)
+```
+```{r}
+dynamic_reg_Fourier_Arima <- auto.arima(model_lm1$residuals,xreg = fourier(ts(model_lm1$residuals,frequency = 365),K=3))
+summary(dynamic_reg_Fourier_Arima)
+model.ma2 <- lm.arma(df_weather_station$temp, df_weather_station$TS_sample,dynamic_reg_Fourier_Arima) 
+residual.ma2 <- residuals(model.ma2)
+
+plot.ts(residual.ma2)
+acf(residual.ma2)
+periodogram(residual.ma2)
+```
+
+
+```{r fig.height=5, fig.width=15}
+#First Covid Case in Chicago: 2020-01-24
+#First stay-at-home order Chicago: 2020-03-21
+
+start <- as.Date("2017-01-01")
+end <- as.Date("2021-09-01")
+pre.period <- c(start, as.Date("2020-03-20"))
+post.period <- c(as.Date("2020-03-21"), end)
+series <- cbind(TS_sample, TS_weather)%>% na.omit()
+impact_COVID <- CausalImpact(series, pre.period, post.period, model.args = list(niter = 1000, nseasons = 52))
+
+plot(impact_COVID)
+summary(impact_COVID)
+summary(impact_COVID, "report")
+```
+# Arima + Fourier 
+```{r fig.height=7, fig.width=20}
+Ts_all <- ts(TS_sample,start = c(2017,1),frequency = 365)
+aarima_in_train <- auto.arima(Ts_train, seasonal=FALSE, xreg = fourier(Ts_train, K=3))
+autoplot(forecast(aarima_in_train, h=365, xreg=fourier(Ts_train, K=3, h=365*3))) +
+  autolayer(Ts_all)
+```
+
+
+### Intervention Modeling 
+```{r fig.height=7, fig.width=20}
+Intervention_idx <- which(TS_sample %>% index() =='2020-03-20')
+P_Covid <- 1*(seq(TS_sample)==Intervention_idx) #Pulse Model 
+S_Covid <- 1*(seq(TS_sample)>=Intervention_idx) #Step Model 
+
+
+mPulse <- 
+arimax(Ts_all,order=c(1,0,5),xreg = fourier(Ts_all, K=3), 
+      xtransf=data.frame(P_Covid, P_Covid), transfer=list(c(0,0),c(1,0)), method='ML')
+mPulse
+
+#Intervention Modeling using linear filtering 
+plot(ts(stats::filter(P_Covid, filter=mPulse$coef['P_Covid.1-AR1'], method='recursive', side=1)*mPulse$coef['P_Covid-MA0'], 
+  frequency = 365, start=c(2017,1)), type='h',ylab='COVID Pulse Effects')
+```
+```{r}
+#Visualizing the transformation function
+steps.ahead <- 365
+tf<-stats::filter(1*(seq(1:(length(Ts_all) + steps.ahead))==Intervention_idx), filter= mPulse$coef['P_Covid.1-AR1'], 
+method='recursive',side=1) * mPulse$coef['P_Covid-MA0']
+plot(tf)
+
+```
+```{r fig.height=7, fig.width=20}
+#Fit the intervention model on the entire dataset 
+xreg_matrix <- cbind(fourier(Ts_all, K=3),tf[1:(length(tf) - steps.ahead)])
+arima_intervention <- auto.arima(Ts_all, seasonal=FALSE, xreg = xreg_matrix)
+
+f2 <- forecast(arima_intervention,xreg=tail(xreg_matrix,steps.ahead))
+
+autoplot(Ts_all) + 
+   autolayer(arima_intervention$fitted,series = 'Fitted') + 
+   autolayer(f2,series = 'Forecast') 
+```
+
+```{r fig.height=7, fig.width=20}
+#Residual Analysis
+autoplot(arima_intervention$residuals)+
+  geom_vline(xintercept = 2020 + (60+21)/365 ,col = "red",size=2)
+```
+
