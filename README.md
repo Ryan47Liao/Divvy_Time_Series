@@ -8,7 +8,7 @@ As people’s usage of traditional commuting plumed since the onset of covid, bi
 **Use Case:**
 - Predicting potential station/dock availability using bike-in and bike-out data as proxies
 
-**Dataset:**
+**Dataset:**  
 https://www.kaggle.com/datasets/leonidasliao/divvy-station-dock-capacity-time-series-forecast
 
 https://ride.divvybikes.com/system-data
